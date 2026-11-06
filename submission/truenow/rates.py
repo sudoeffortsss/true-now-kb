@@ -21,7 +21,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from .clean import plain
-from .text import amount_range, model_year_range, term_months, tokens
+from .text import amount_range, expiry_date, model_year_range, term_months, tokens
 
 _PERCENT_CELL = re.compile(r"\d+(?:\.\d+)?\s*%")
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
@@ -34,7 +34,7 @@ _NOISE = frozenset(tokens(
     "month months year years model fixed standard purchase balance between new used option options "
     "type types price cost percent like know tell would link links url website site page see view "
     "find use check look online show", keep_stopwords=True))
-_VARIANTS = frozenset(tokens(
+VARIANTS = frozenset(tokens(
     "jumbo roth traditional ira refinance refi cash intro introductory transfer promotional promo "
     "equity achieve health hsa", keep_stopwords=True))
 _BUSINESS = "business"
@@ -62,8 +62,20 @@ def metric_kind(header: str) -> str:
 
 
 def norm(text: str) -> str:
-    text = text.replace("\u2013", "-").replace("\u2014", "-").replace("’", "'")
+    text = text.replace("\u2013", "-").replace("\u2014", "-").replace("\u2019", "'")
     return re.sub(r"\s+", " ", text).strip().lower()
+
+
+# "6-month certificate APY: 3.50%" or "Summer special: 6-month certificate APY 2.95% (offer ended ...)"
+_TEXT_RATE = re.compile(
+    r"^(?P<label>[^:|]{3,80}):\s*(?P<name>[^%:]{0,60}?)\s*(?P<value>\d+(?:\.\d+)?\s*%)\s*(?P<tail>.{0,80})$")
+_METRIC_WORD = re.compile(r"\b(apy|apr|rate|dividend|yield)\b", re.I)
+
+
+def _text_metric(words: str) -> str:
+    for word in _METRIC_WORD.findall(words.lower()):
+        return {"apy": "apy", "yield": "apy", "apr": "apr", "dividend": "dividend"}.get(word, "rate")
+    return ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +94,9 @@ class RateFact:
     term: int | None
     amount: tuple | None
     model: tuple | None
+    expires: str = ""  # ISO date the offer ended or ends, when the page says so
+    line: int = 0      # line of the row in the cleaned page text
+    carried: bool = False  # the page is only known from an earlier crawl
 
     @property
     def words(self) -> frozenset:
@@ -113,6 +128,12 @@ def rate_facts(snapshot) -> list:
             for header, cell in zip(row.header, row.cells):
                 kind = metric_kind(header)
                 if kind and _PERCENT_CELL.search(cell):
+                    # A cell that names its own measure wins over a mislabeled header
+                    # (a calculator lists "5.34% APR" under "Annual Percentage Yield").
+                    if re.search(r"%\s*APR\b", cell):
+                        kind = "apr"
+                    elif re.search(r"%\s*APY\b", cell):
+                        kind = "apy"
                     values.append((kind, header, cell))
                     continue
                 if kind or _SKIP_COLUMN.search(header) or norm(cell) in _EMPTY:
@@ -136,11 +157,42 @@ def rate_facts(snapshot) -> list:
                 label_words=frozenset(tokens(f"{row.section} {row.label}")),
                 name_words=frozenset(tokens(name)),
                 values=tuple(values), effective=row.effective,
-                term=term, amount=amount, model=model,
+                term=term, amount=amount, model=model, expires=row.expires,
+                line=row.line, carried=page.carried,
             ))
+            order += 1
+        for fact in _text_facts(page, order):
+            facts.append(fact)
             order += 1
     snapshot.cache["rate_facts"] = facts
     return facts
+
+
+def _text_facts(page, order: int) -> list:
+    """Rates written as "label: value" lines outside tables."""
+    out = []
+    for number, line in enumerate(page.text.splitlines()):
+        stripped = plain(line.strip().lstrip("-* "))
+        if not stripped or stripped.startswith("|") or len(stripped) > 170:
+            continue
+        found = _TEXT_RATE.match(stripped)
+        if not found:
+            continue
+        label, name, value, tail = (found.group(g).strip() for g in ("label", "name", "value", "tail"))
+        kind = _text_metric(f"{label} {name} {tail[:4]}")
+        if not kind:
+            continue
+        described = f"{label} {name}"
+        terms = term_months(described)
+        out.append(RateFact(
+            url=page.url, kind=page.kind, rank=page.rank, order=order + len(out),
+            group=(page.url, "", label), label=label, name=name,
+            label_words=frozenset(tokens(label)), name_words=frozenset(tokens(name)),
+            values=((kind, kind, value),), effective="",
+            term=terms[0] if terms else None, amount=None, model=model_year_range(described),
+            expires=expiry_date(tail), line=number, carried=page.carried,
+        ))
+    return out
 
 
 def _idf(sets) -> dict:
@@ -149,7 +201,7 @@ def _idf(sets) -> dict:
     return {w: math.log(1 + total / c) for w, c in counts.items()}
 
 
-def _context(snapshot) -> dict:
+def rate_context(snapshot) -> dict:
     cached = snapshot.cache.get("rate_context")
     if cached is not None:
         return cached
@@ -213,14 +265,14 @@ def _fits(query, scored):
 
 def _variants(query, scored, keep_business: bool):
     asked = set(query.words)
-    wanted = asked & _VARIANTS
+    wanted = asked & VARIANTS
     if wanted:
         having = [(s, f) for s, f in scored if wanted <= f.words]
         if having:
             scored = having
 
     def is_variant(fact) -> bool:
-        if (fact.words & _VARIANTS) - asked:
+        if (fact.words & VARIANTS) - asked:
             return True
         return not keep_business and _BUSINESS in fact.words and _BUSINESS not in asked
 
@@ -251,7 +303,7 @@ def find_rates(query, snapshot) -> RateResult | None:
     words = product_words(query)
     if not facts or not words:
         return None
-    context = _context(snapshot)
+    context = rate_context(snapshot)
     missing = sorted(w for w in words if w not in context["vocabulary"] and w in context["topics"])
     if missing:
         return RateResult(declined=True, missing=" ".join(missing))
@@ -263,6 +315,9 @@ def find_rates(query, snapshot) -> RateResult | None:
             scored.append((score, fact))
     if not scored:
         return None
+    # An offer the page itself says has ended is stale; keep it only when nothing else matches.
+    current = [(s, f) for s, f in scored if not (f.expires and f.expires < snapshot.taken_on)]
+    scored = current or scored
     best = max(s for s, _ in scored)
     broad = query.wants_list or bool(query.percents)
     scored = [(s, f) for s, f in scored if s >= best * (_LIST_SHARE if broad else 0.95)]

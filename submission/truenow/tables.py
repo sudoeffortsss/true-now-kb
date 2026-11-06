@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .text import expiry_date
+
 _SEPARATOR = re.compile(r"^\s*\|(\s*:?-{3,}:?\s*\|)+\s*$")
 _EFFECTIVE = re.compile(r"effective (?:as of )?(\d{1,2}/\d{1,2}/\d{4})", re.I)
 _LINK_ONLY = re.compile(r"^(\[[^\]]*\]\([^)]*\)\s*)+$")
@@ -25,6 +27,7 @@ class TableRow:
     cells: tuple
     effective: str  # "MM/DD/YYYY" found just below the table, or ""
     line: int       # 0-based line of the row in the cleaned page text
+    expires: str = ""  # ISO date an offer note near the table says it ends, or ""
 
     def cell(self, column: str) -> str:
         """Value of the first column whose header contains `column` (case-insensitive)."""
@@ -75,15 +78,16 @@ def parse_tables(text: str) -> list:
             while j < len(lines) and lines[j].strip().startswith("|"):
                 body.append((j, split_row(lines[j])))
                 j += 1
-            effective = ""
+            effective = expires = ""
             for k in range(j, min(j + 8, len(lines))):
                 if lines[k].strip().startswith("|"):
                     break
                 found = _EFFECTIVE.search(lines[k])
-                if found:
+                if found and not effective:
                     effective = found.group(1)
-                    break
-            rows.extend(TableRow(section, label, header, cells, effective, n) for n, cells in body)
+                expires = expires or expiry_date(lines[k])
+            expires = expires or expiry_date(f"{section} {label}")
+            rows.extend(TableRow(section, label, header, cells, effective, n, expires) for n, cells in body)
             last_was_label = False
             i = j
             continue

@@ -6,10 +6,26 @@ import re
 from .contract_types import Answer, Source
 from .extract import find_address, find_count, find_event, find_hours, find_link, find_passage
 from .query import analyze
-from .rates import find_rates, format_rates
+from .rates import VARIANTS, find_rates, format_rates
+from .text import tokens, words_to_digits
 
-REFUSAL = ("I can't confirm that from Dupaco's website: it isn't listed there. "
-           "Please contact Dupaco directly for this detail.")
+REFUSAL = ("I can't confirm that from our website: it isn't listed there. "
+           "Please contact us directly for this detail.")
+
+
+def _states_rate(query, text: str) -> bool:
+    """A passage only answers a rate question if it gives a rate for the term and variant asked."""
+    lower = words_to_digits(text.lower())
+    if not re.search(r"\d+(?:\.\d+)?\s*%", lower):
+        return False
+    for months in query.terms:
+        said = re.search(rf"\b{months}[\s-]*(?:month|mo)", lower)
+        if not said and months % 12 == 0:
+            said = re.search(rf"\b{months // 12}[\s-]*(?:year|yr)", lower)
+        if not said:
+            return False
+    asked = set(query.words) & VARIANTS
+    return asked <= set(tokens(text))
 _NEWS_TOPICS = re.compile(r"\b(award|awards|recogni\w+|ranked|ranking|named|forbes|honor\w*|anniversary|"
                           r"how long|latest|recent)\b", re.I)
 
@@ -81,6 +97,8 @@ def respond(library, question: str, as_of: str | None = None) -> Answer:
             return _answer(found.text, found.sources, snapshot)
 
     found = find_passage(query, snapshot, prefer_new=bool(_NEWS_TOPICS.search(question)))
+    if found and query.is_rate and not _states_rate(query, found.text):
+        return refusal()  # the site talks about the product but publishes no such rate
     if found:
         return _answer(found.text, found.sources, snapshot)
     return refusal()

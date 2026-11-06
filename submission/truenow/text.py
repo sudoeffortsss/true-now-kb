@@ -104,10 +104,32 @@ def money_values(text: str) -> list:
     return out
 
 
+_UNITS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80,
+         "ninety": 90}
+_NUMBER_WORD = re.compile(
+    r"\b(?:(" + "|".join(_TENS) + r")(?:[\s-](" + "|".join(list(_UNITS)[:9]) + r"))?|(" + "|".join(_UNITS) + r"))\b",
+    re.I)
+
+
+def words_to_digits(text: str) -> str:
+    """"six month" -> "6 month", "thirty-six months" -> "36 months"."""
+    def repl(match):
+        tens, unit, alone = match.group(1), match.group(2), match.group(3)
+        if alone:
+            return str(_UNITS[alone.lower()])
+        return str(_TENS[tens.lower()] + (_UNITS[unit.lower()] if unit else 0))
+    return _NUMBER_WORD.sub(repl, text)
+
+
 def term_months(text: str) -> list:
     """Loan or deposit terms mentioned in text, in months ("60-month" -> 60, "30-year" -> 360)."""
     out = []
-    for number, unit in _TERM.findall(text):
+    for number, unit in _TERM.findall(words_to_digits(text)):
         n = int(number)
         out.append(n * 12 if unit.lower().startswith("y") else n)
     return out
@@ -133,6 +155,28 @@ def amount_range(cell: str):
     if len(nums) >= 2:  # "$10,000-24,999"
         return (low, float(nums[1].replace(",", "")))
     return (low, low)
+
+
+_MONTH_NUMBERS = {name: i for i, name in enumerate(
+    ("january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+     "november", "december"), 1)}
+_DATE = (r"(?:(20\d{2})-(\d{2})-(\d{2})|(\d{1,2})/(\d{1,2})/(20\d{2})|"
+         r"(" + "|".join(_MONTH_NUMBERS) + r")\s+(\d{1,2}),?\s+(20\d{2}))")
+_EXPIRY = re.compile(r"\b(?:ended|ends|expired|expires|expiring|valid through|valid until|available through|"
+                     r"good through|offered through|through|until)\s+(?:on\s+)?" + _DATE, re.I)
+
+
+def expiry_date(text: str) -> str:
+    """ISO date an offer is said to end ("offer ended 2025-09-30", "valid through June 30, 2026"), or ""."""
+    found = _EXPIRY.search(text)
+    if not found:
+        return ""
+    g = found.groups()
+    if g[0]:
+        return f"{g[0]}-{g[1]}-{g[2]}"
+    if g[3]:
+        return f"{int(g[5]):04d}-{int(g[3]):02d}-{int(g[4]):02d}"
+    return f"{int(g[8]):04d}-{_MONTH_NUMBERS[g[6].lower()]:02d}-{int(g[7]):02d}"
 
 
 def model_year_range(cell: str):

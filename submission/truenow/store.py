@@ -22,6 +22,7 @@ class Page:
     published: str  # ISO date shown on news releases and articles, or ""
     text: str       # cleaned markdown
     rows: list = field(default_factory=list)
+    carried: bool = False  # seen in an earlier snapshot only; kept at lower rank
 
 
 @dataclass

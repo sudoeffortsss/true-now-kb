@@ -20,14 +20,15 @@ RANK = {
     "article": 5,     # blog and resource articles
 }
 
-_RATE_SHEET = re.compile(r"^/(?:[a-z]+-)?rates$")
+_RATE_SHEET = re.compile(r"^/(?:[a-z]+-)?rates(?:/|$)")
 _SECTIONS = frozenset({
     "personal", "business", "about", "savings-account", "checking-account",
     "connect", "online-and-mobile-banking",
 })
-_CORE_SINGLE_PAGES = frozenset({
-    "contact", "membership", "mobile", "shine", "protection", "financial-services",
-})
+# Slugs of landing and promotion pages ("checking-offer-lp", "switch-and-earn", "homebuying-guidance").
+_CAMPAIGN_SLUG = re.compile(
+    r"(-lp$|offer|promo|special|switch|earn-more|refi$|guidance|makeover|sprint|challenge|grant|"
+    r"thank|contest|sweepstake|giveaway)")
 _DATED_POST = re.compile(r"^/(\d{4})/(\d{2})/(\d{2})/")
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -76,10 +77,10 @@ def page_type(url: str) -> str:
         return "article"
     if first == "business" and len(parts) > 1 and parts[1] == "resources":
         return "article"
-    if first in _SECTIONS:
+    if any(_CAMPAIGN_SLUG.search(part) for part in parts):
+        return "campaign"
+    if first in _SECTIONS or len(parts) == 1:
         return "product"
-    if len(parts) == 1:
-        return "product" if first in _CORE_SINGLE_PAGES else "campaign"
     return "campaign"
 
 
