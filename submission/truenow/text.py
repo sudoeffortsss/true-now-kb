@@ -5,10 +5,12 @@ import re
 
 _WORD = re.compile(r"[a-z0-9]+")
 STOPWORDS = frozenset("""
-a about all also am an and any are as at be been but by can could did do does for from get give
-had has have how i if in into is it its just know let like me my need of on or our please
-provide should so some tell than that the their them then there these they this to us want was
-we were what when where which who whom why will with would you your dupaco dupaco's
+a about above after all also am an and any are around as at be been before below but by can could
+did do does down during for from get give go going got had has have how i if in into is it its just
+know let like many me more much my near need of off on or our out over per please provide should so
+some tell than that the their them then there these they this through to under until up upon us via
+want was we were what when where which while who whom why will with within without would you your
+dupaco dupaco's
 """.split())
 
 # Canonical token for words the site and its members use interchangeably.
@@ -33,7 +35,7 @@ _CANON = {
 
 
 # Verbs whose -ing / -ed / -s forms should match the base form ("updating" ~ "update").
-_VERBS = frozenset("""
+VERBS = frozenset("""
 update change close open join apply earn pay add use find move transfer deposit withdraw call visit
 order replace report lose lock reset enroll register sign log access set schedule receive qualify
 refinance finance borrow save locate recognize rank name award offer charge
@@ -45,13 +47,13 @@ def _verb(token: str) -> str:
         if token.endswith(suffix) and len(token) - len(suffix) >= 3:
             base = token[: -len(suffix)]
             for candidate in (base, base + "e", base[:-1] if base[-1:] == base[-2:-1] else ""):
-                if candidate in _VERBS:
+                if candidate in VERBS:
                     return candidate
     return ""
 
 
 def stem(token: str) -> str:
-    if token in _VERBS:
+    if token in VERBS:
         return token
     verb = _verb(token)
     if verb:

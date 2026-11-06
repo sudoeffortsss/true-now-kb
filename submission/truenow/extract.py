@@ -308,11 +308,55 @@ def find_address(query, snapshot) -> Found | None:
 
 # --- counts and events ------------------------------------------------------------------
 
-def _head_noun(question: str) -> str:
+def _count_nouns(question: str) -> list:
+    """Content words of the phrase after "how many" ("branch locations" -> ["branch", "location"])."""
     found = _HOW_MANY.search(question)
     phrase = found.group(1) if found else re.sub(r"(?i).*\bhow many\b", "", question)
     words = tokens(phrase)
-    return words[-1] if found and words else (words[0] if words else "")
+    return words[:3] if found else words[:1]
+
+
+_ORDINAL_TIME = re.compile(
+    r"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth)\s+"
+    r"(?:consecutive\s+)?time\b", re.I)
+
+
+def find_ordinal(query, snapshot) -> Found | None:
+    """ "How many times has X ..." answered from the newest "the fifth time X ..." statement."""
+    key = key_words(query, snapshot) - set(tokens("time"))
+    if not key:
+        return None
+    anchor = max(key, key=snapshot.index.idf)
+    candidates = []
+    for position, _ in snapshot.index.postings.get(anchor, ()):
+        passage = snapshot.passages[position]
+        page = snapshot.pages[passage.url]
+        for sentence in sentences(passage.text):
+            if _ORDINAL_TIME.search(sentence) and key <= set(tokens(sentence)):
+                candidates.append((page.published or "0000", -page.rank, sentence, page))
+    if not candidates:
+        return None
+    published, _, sentence, page = max(candidates, key=lambda c: (c[0], c[1]))
+    when = f" (as stated on {_human(page.published)})" if page.published else ""
+    return Found(f"{sentence}{when}", [(page.url, sentence)])
+
+
+_PHONE = re.compile(r"\b\d{3}-\d{3}-\d{4}\b")
+
+
+def find_phone(snapshot) -> Found | None:
+    """The phone number official pages give most often."""
+    counts, where = {}, {}
+    for page in snapshot.pages.values():
+        if page.rank > 1:
+            continue
+        for number in set(_PHONE.findall(page.text)):
+            counts[number] = counts.get(number, 0) + 1
+            where.setdefault(number, page.url)
+    if not counts:
+        return None
+    number = max(counts, key=lambda n: (counts[n], n))
+    return Found(f"You can call {number}.", [(where[number], number)])
 
 
 def _year_asked(query, today: str):
@@ -334,12 +378,16 @@ def find_count(query, snapshot, today: str = "") -> Found | None:
     about that year wins. If no statement covers a relative year, the newest
     figure is given with its year, followed by the one reported before it.
     """
-    noun = _head_noun(query.text)
-    if not noun:
+    nouns = _count_nouns(query.text)
+    if not nouns:
         return None
-    context = set(query.words) - {noun} - set(tokens("how many number total last this past previous year"))
+    if nouns[-1] == "time":
+        return find_ordinal(query, snapshot)
+    wanted = set(nouns)
+    context = set(query.words) - wanted - set(tokens("how many number total last this past previous year"))
+    positions = sorted({p for noun in wanted for p, _ in snapshot.index.postings.get(noun, ())})
     candidates = []
-    for position, _ in snapshot.index.postings.get(noun, ()):
+    for position in positions:
         passage = snapshot.passages[position]
         page = snapshot.pages[passage.url]
         for sentence in sentences(passage.text):
@@ -351,7 +399,7 @@ def find_count(query, snapshot, today: str = "") -> Found | None:
                 j = 0
                 while j < len(gap) and gap[j] in _COUNT_MODIFIERS:
                     j += 1
-                if j < len(gap) and gap[j] == noun:
+                if j < len(gap) and gap[j] in wanted:
                     cover = sum(snapshot.index.idf(w) for w in context & set(words))
                     year = re.search(r"\b(?:in|during)\s+(20\d{2})\b", sentence)
                     candidates.append((cover, sentence, page, int(year.group(1)) if year else None))
@@ -427,12 +475,11 @@ def _subject(query, places: set) -> str:
 
 
 def key_words(query, snapshot) -> set:
-    """The rarest question words the site uses at all (for example "forbes")."""
-    known = [w for w in set(query.words) if snapshot.index.postings.get(w)]
+    """The rarest question word the site uses at all (for example "forbes")."""
+    known = sorted(w for w in set(query.words) if snapshot.index.postings.get(w))
     if not known:
         return set()
-    top = max(snapshot.index.idf(w) for w in known)
-    return {w for w in known if snapshot.index.idf(w) >= top * 0.85}
+    return {max(known, key=lambda w: (snapshot.index.idf(w), w))}
 
 
 def _lead_passage(snapshot, page, key: set):

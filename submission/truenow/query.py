@@ -17,10 +17,16 @@ _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent)", re.I)
 _YEAR = re.compile(r"\b(19[5-9]\d|20[0-4]\d)\b")
 _VEHICLE = re.compile(r"\b(model|vehicle|car|auto|motorcycle|truck|boat|rv|atv|snowmobile|jet ski)\b", re.I)
 
-_LINK = re.compile(r"\b(link|links|url|urls|web ?site|web ?page|web address|which page)\b", re.I)
-_ONLINE_ACTION = re.compile(r"\b(join|apply|open|enroll|sign up|register|start)\b.*\bonline\b|"
-                            r"\bonline\b.*\b(join|apply|open|enroll|sign up|register|application)\b", re.I)
-_HOURS = re.compile(r"\bhours?\b|\bwhat time\b|\bopen (?:on|until|till|at)\b", re.I)
+_LINK = re.compile(r"\b(link|links|url|urls|web ?site|web ?page|web address|page)\b", re.I)
+_ONLINE_ACTION = re.compile(
+    r"\b(join|apply|open|enroll|sign up|register|start|become a member)\b.*\bonline\b|"
+    r"\bonline\b.*\b(join|apply|open|enroll|sign up|register|application|become a member)\b", re.I)
+_HOURS = re.compile(r"\bhours?\b|\bwhat time\b|\bopen (?:on|until|till|at|late)\b", re.I)
+_COUNTER = re.compile(r"\b(lobby|lobbies|drive[- ]?(?:up|thru|through))\b", re.I)
+_OPEN_CLOSE = re.compile(r"\b(open|opens|close|closes|closing|opening)\b", re.I)
+_PRODUCT = re.compile(r"\b(certificates?|cds?|loans?|mortgages?|accounts?|savings|checking|cards?|visa|ira|iras|"
+                      r"heloc|money market|specials?)\b", re.I)
+_EARNS = re.compile(r"\b(pay|pays|paying|earn|earns|earning|charge|charges)\b", re.I)
 _ADDRESS = re.compile(r"\baddress\b|\bwhere is\b|\bwhere's\b|\blocated\b|\blocation of\b", re.I)
 _COUNT = re.compile(r"\bhow many\b|\bnumber of\b", re.I)
 _WHEN = re.compile(r"^\s*when\b|\bwhat date\b", re.I)
@@ -53,6 +59,7 @@ class Query:
     asks_when: bool
     asks_status: bool
     yes_no: bool
+    names_product: bool    # mentions a deposit or loan product
 
 
 def _last_day(year: int, month: int) -> str:
@@ -99,12 +106,14 @@ def analyze(question: str, as_of: str | None = None) -> Query:
     terms = term_months(re.sub(r"\bmodel[\s-]+years?\b", " ", undated, flags=re.I))
     amounts = money_values(undated)
     extreme = "max" if _MAX.search(lower) else ("min" if _MIN.search(lower) else "")
+    names_product = bool(_PRODUCT.search(lower))
     return Query(
         text=question,
         words=tokens(undated),
         day=question_day(question, as_of),
         metric=metric,
-        is_rate=bool(metric) or bool(percents),
+        # "How much does Bright Savings pay?" asks for a rate without saying "rate".
+        is_rate=bool(metric) or bool(percents) or (names_product and bool(_EARNS.search(lower))),
         terms=terms,
         amounts=amounts,
         model_year=model_year,
@@ -112,10 +121,11 @@ def analyze(question: str, as_of: str | None = None) -> Query:
         wants_list=bool(_LIST.search(lower) or _PLURAL.search(lower)),
         extreme=extreme,
         wants_link=bool(_LINK.search(lower) or _ONLINE_ACTION.search(lower)),
-        asks_hours=bool(_HOURS.search(lower)),
+        asks_hours=bool(_HOURS.search(lower) or (_COUNTER.search(lower) and _OPEN_CLOSE.search(lower))),
         asks_address=bool(_ADDRESS.search(lower)),
         asks_count=bool(_COUNT.search(lower)),
         asks_when=bool(_WHEN.search(lower)),
         asks_status=bool(_STATUS.search(lower)),
         yes_no=bool(_YES_NO.search(lower)),
+        names_product=names_product,
     )

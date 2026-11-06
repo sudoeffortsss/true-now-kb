@@ -4,13 +4,17 @@ from __future__ import annotations
 import re
 
 from .contract_types import Answer, Source
-from .extract import find_address, find_count, find_event, find_hours, find_link, find_passage
+from .extract import (find_address, find_count, find_event, find_hours, find_link, find_passage,
+                      find_phone)
 from .query import analyze
 from .rates import VARIANTS, find_rates, format_rates
 from .text import tokens, words_to_digits
 
 REFUSAL = ("I can't confirm that from our website: it isn't listed there. "
            "Please contact us directly for this detail.")
+STATUS_UNLISTED = ("That isn't listed on the current rate sheet, so I can't confirm it is still offered. "
+                   "Please contact us directly.")
+_PHONE_QUESTION = re.compile(r"\b(phone|telephone)\b|\bcall\b.*\bnumber\b|\bnumber\b.*\bcall\b", re.I)
 
 
 def _states_rate(query, text: str) -> bool:
@@ -61,6 +65,20 @@ def respond(library, question: str, as_of: str | None = None) -> Answer:
         found = find_link(query, snapshot)
         if found:
             return _answer(found.text, found.sources, snapshot)
+
+    if _PHONE_QUESTION.search(question) and not re.search(r"\brouting\b|\baccount number\b", question, re.I):
+        found = find_phone(snapshot)
+        if found:
+            return _answer(found.text, found.sources, snapshot)
+
+    if query.asks_status and query.names_product:
+        # "Is the 25-month certificate special still offered?": the current rate sheet decides.
+        rates = find_rates(query, snapshot)
+        if rates is not None:
+            if rates.declined or not rates.facts:
+                return Answer(text=STATUS_UNLISTED, sources=[], confident=False)
+            sources = [(u, "") for u in rates.sources]
+            return _answer("Yes. " + format_rates(query, rates), sources, snapshot)
 
     if query.is_rate:
         rates = find_rates(query, snapshot)

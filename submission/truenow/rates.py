@@ -21,7 +21,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from .clean import plain
-from .text import amount_range, expiry_date, model_year_range, term_months, tokens
+from .text import VERBS, amount_range, expiry_date, model_year_range, term_months, tokens
 
 _PERCENT_CELL = re.compile(r"\d+(?:\.\d+)?\s*%")
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
@@ -31,9 +31,13 @@ _EMPTY = frozenset({"", "-", "\u2014", "\u2013", "none", "n/a"})
 _NOISE = frozenset(tokens(
     "rate rates apy apr dividend interest annual percentage yield current currently today now right "
     "offer offered earn earning pay paying charge much highest lowest best top tier tiers account accounts "
-    "month months year years model fixed standard purchase balance between new used option options "
+    "month months year years model fixed standard balance between new used option options "
     "type types price cost percent like know tell would link links url website site page see view "
-    "find use check look online show", keep_stopwords=True))
+    "find use check look online show finance financing borrow buy still available", keep_stopwords=True))
+# Words that mark a heading as being about a product, used to tell product names from other words.
+_PRODUCT_TYPES = frozenset(tokens(
+    "loan loans mortgage mortgages certificate certificates account accounts card cards savings checking "
+    "ira heloc deposit deposits rate rates", keep_stopwords=True))
 VARIANTS = frozenset(tokens(
     "jumbo roth traditional ira refinance refi cash intro introductory transfer promotional promo "
     "equity achieve health hsa", keep_stopwords=True))
@@ -154,7 +158,10 @@ def rate_facts(snapshot) -> list:
             facts.append(RateFact(
                 url=page.url, kind=page.kind, rank=page.rank, order=order,
                 group=(page.url, row.section, row.label), label=plain(row.label), name=name,
-                label_words=frozenset(tokens(f"{row.section} {row.label}")),
+                # Labels, plus the names of descriptive columns ("Certificate", "Card Type", "IRA Type"),
+                # which say what product the table lists even when its label is just "Regular".
+                # A business page's rows belong to business accounts even when the label omits it.
+                label_words=_label_words(page, row, term, values),
                 name_words=frozenset(tokens(name)),
                 values=tuple(values), effective=row.effective,
                 term=term, amount=amount, model=model, expires=row.expires,
@@ -166,6 +173,27 @@ def rate_facts(snapshot) -> list:
             order += 1
     snapshot.cache["rate_facts"] = facts
     return facts
+
+
+_CERTIFICATE = tokens("certificate")[0]
+_TERM_DEPOSITS = frozenset(tokens("certificate ira roth traditional", keep_stopwords=True))
+_HEADER_NOISE = re.compile(r"\b(type|program|tier|term|balance|amount|product|category)\b", re.I)
+
+
+def _label_words(page, row, term, values) -> frozenset:
+    words = set(tokens(f"{row.section} {row.label} {_name_headers(row.header)}"))
+    if _BUSINESS in page.url.lower():
+        words.add(_BUSINESS)  # a business page's rows belong to business accounts
+    # A deposit with a fixed term is a certificate, even under a label such as "Regular".
+    if term and any(k in ("apy", "dividend") for k, _, _ in values) and not words & _TERM_DEPOSITS:
+        words.add(_CERTIFICATE)
+    return frozenset(words)
+
+
+def _name_headers(header: tuple) -> str:
+    """Words of the descriptive (non-rate) column names, without generic ones like "Type"."""
+    names = [h for h in header if not metric_kind(h) and not _SKIP_COLUMN.search(h)]
+    return _HEADER_NOISE.sub(" ", " ".join(names))
 
 
 def _text_facts(page, order: int) -> list:
@@ -207,12 +235,15 @@ def rate_context(snapshot) -> dict:
         return cached
     facts = rate_facts(snapshot)
     groups = {f.group: f.label_words for f in facts}
+    # Product names the site writes about: words of titles and headings that name a product type
+    # ("Could an adjustable-rate mortgage help you buy a home today?", "Building With Construction Loans").
     topics = set()
     for page in snapshot.pages.values():
-        topics.update(tokens(page.title))
-        for line in page.text.splitlines():
-            if line.startswith("#"):
-                topics.update(tokens(plain(line)))
+        headings = [page.title] + [plain(line) for line in page.text.splitlines() if line.startswith("#")]
+        for heading in headings:
+            words = set(tokens(heading))
+            if words & _PRODUCT_TYPES:
+                topics.update(w for w in words if w not in VERBS)
     context = {
         "label_idf": _idf(list(groups.values())),
         "name_idf": _idf([f.name_words for f in facts]),
@@ -297,6 +328,22 @@ def _dedupe(scored) -> list:
     return out
 
 
+def _effective_iso(fact) -> str:
+    found = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", fact.effective or "")
+    return f"{found.group(3)}-{int(found.group(1)):02d}-{int(found.group(2)):02d}" if found else ""
+
+
+def _newest_effective(scored) -> list:
+    """When equally ranked pages give one row different values, keep the most recently effective one."""
+    best = {}
+    for s, f in scored:
+        row = (re.sub(r"\bbusiness\b", "", norm(f.label)).strip(), norm(f.name), _BUSINESS in f.words)
+        if row not in best or _effective_iso(f) > _effective_iso(best[row][1]):
+            best[row] = (s, f)
+    keep = {id(f) for _, f in best.values()}
+    return [(s, f) for s, f in scored if id(f) in keep]
+
+
 def find_rates(query, snapshot) -> RateResult | None:
     """Rows answering a rate question, a decline, or None when no table is relevant."""
     facts = rate_facts(snapshot)
@@ -333,6 +380,7 @@ def find_rates(query, snapshot) -> RateResult | None:
         primary += [(s, f) for s, f in scored if f.rank == 1 and norm(f.label) not in covered]
     # Personal rows first, so a business row that only repeats them is dropped as a duplicate.
     primary = _dedupe(sorted(primary, key=lambda sf: (sf[1].rank, _BUSINESS in sf[1].words, sf[1].order)))
+    primary = _newest_effective(primary)
     result = RateResult()
 
     if query.extreme:
