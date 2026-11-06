@@ -4,3 +4,17 @@ __pycache__/
 .DS_Store
 .env
 snapshots/0*/
+
+# Provided data and documents: never commit (the data must not be redistributed)
+snapshots_zip/
+*.zip
+Knowledge-Hackathon-Assignment.pdf
+
+# Derived data from the snapshots (indexes, extracted tables, caches) lives under .cache/ only
+.cache/
+
+# Local environments and secrets
+.venv/
+venv/
+.env.*
+!.env.example
