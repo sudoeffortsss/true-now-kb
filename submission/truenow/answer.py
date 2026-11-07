@@ -49,6 +49,11 @@ def _answer(text: str, sources: list, snapshot, note: str | None = None) -> Answ
 
 
 def respond(library, question: str, as_of: str | None = None) -> Answer:
+    return respond_traced(library, question, as_of)[0]
+
+
+def respond_traced(library, question: str, as_of: str | None = None) -> tuple:
+    """(Answer, name of the reader that produced it). The model layer routes on the name."""
     query = analyze(question, as_of)
     snapshot = library.at(query.day)
     today = query.day or library.latest.taken_on
@@ -61,62 +66,62 @@ def respond(library, question: str, as_of: str | None = None) -> Answer:
                         [u for u in rates.sources if snapshot.pages[u].rank == 0]
                 if pages:
                     listed = " or ".join(pages[:2])
-                    return _answer(f"You can see them at {listed}.", [(u, "") for u in pages[:2]], snapshot)
+                    return _answer(f"You can see them at {listed}.", [(u, "") for u in pages[:2]], snapshot), "rates_link"
         found = find_link(query, snapshot)
         if found:
-            return _answer(found.text, found.sources, snapshot)
+            return _answer(found.text, found.sources, snapshot), "link"
 
     if _PHONE_QUESTION.search(question) and not re.search(r"\brouting\b|\baccount number\b", question, re.I):
         found = find_phone(snapshot)
         if found:
-            return _answer(found.text, found.sources, snapshot)
+            return _answer(found.text, found.sources, snapshot), "phone"
 
     if query.asks_status and query.names_product:
         # "Is the 25-month certificate special still offered?": the current rate sheet decides.
         rates = find_rates(query, snapshot)
         if rates is not None:
             if rates.declined or not rates.facts:
-                return Answer(text=STATUS_UNLISTED, sources=[], confident=False)
+                return Answer(text=STATUS_UNLISTED, sources=[], confident=False), "status_unlisted"
             sources = [(u, "") for u in rates.sources]
-            return _answer("Yes. " + format_rates(query, rates), sources, snapshot)
+            return _answer("Yes. " + format_rates(query, rates), sources, snapshot), "rates_status"
 
     if query.is_rate:
         rates = find_rates(query, snapshot)
         if rates is not None:
             if rates.declined:
-                return refusal()
+                return refusal(), "refusal_rates_declined"
             note = None
             if rates.older:
                 pages = sorted({f.url for f in rates.older})[:3]
                 note = "Older figures still appear on " + ", ".join(pages) + "; the rate sheet value is used."
             sources = [(u, "") for u in rates.sources]
-            return _answer(format_rates(query, rates), sources, snapshot, note)
+            return _answer(format_rates(query, rates), sources, snapshot, note), "rates"
 
     if query.asks_hours:
         found = find_hours(query, snapshot)
         if found is not None:
             if not found.confident:
-                return refusal()
-            return _answer(found.text, found.sources, snapshot)
+                return refusal(), "refusal_hours"
+            return _answer(found.text, found.sources, snapshot), "hours"
 
     if query.asks_address:
         found = find_address(query, snapshot)
         if found:
-            return _answer(found.text, found.sources, snapshot)
+            return _answer(found.text, found.sources, snapshot), "address"
 
     if query.asks_count:
         found = find_count(query, snapshot, today)
         if found:
-            return _answer(found.text, found.sources, snapshot)
+            return _answer(found.text, found.sources, snapshot), "count"
 
     if query.asks_when or query.asks_status:
         found = find_event(query, snapshot, today)
         if found:
-            return _answer(found.text, found.sources, snapshot)
+            return _answer(found.text, found.sources, snapshot), "event"
 
     found = find_passage(query, snapshot, prefer_new=bool(_NEWS_TOPICS.search(question)))
     if found and query.is_rate and not _states_rate(query, found.text):
-        return refusal()  # the site talks about the product but publishes no such rate
+        return refusal(), "refusal_rate_not_stated"  # the site talks about the product but publishes no such rate
     if found:
-        return _answer(found.text, found.sources, snapshot)
-    return refusal()
+        return _answer(found.text, found.sources, snapshot), "passage"
+    return refusal(), "refusal_nothing_found"

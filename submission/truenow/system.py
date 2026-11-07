@@ -5,9 +5,10 @@ import dataclasses
 import sys
 import traceback
 
-from .answer import refusal, respond
+from .answer import refusal, respond_traced
 from .conflicts import find_conflicts
 from .extract import locator_url, schedules
+from .llm import ModelReader
 from .pages import RANK
 from .rates import rate_context, rate_facts
 from .store import Library, Snapshot, build_page
@@ -28,6 +29,7 @@ class TrueNow:
         self._answers = {}
         self._conflicts = None
         self._seen = {}  # url -> newest Page seen so far
+        self.model = ModelReader.from_env()  # None without GEMINI_API_KEY: rules only
 
     def ingest(self, snapshot) -> None:
         """Index one crawl. Pages missing from it but seen earlier are kept at a lower rank:
@@ -51,10 +53,18 @@ class TrueNow:
         key = (question.strip(), as_of)
         if key not in self._answers:
             try:
-                self._answers[key] = respond(self.library, question, as_of)
+                answer, reader = respond_traced(self.library, question, as_of)
             except Exception:  # never let one question take the run down
                 traceback.print_exc(file=sys.stderr)
-                self._answers[key] = refusal()
+                answer, reader = refusal(), "error"
+            if self.model is not None and reader != "error":
+                try:
+                    better = self.model.answer(self.library, question, as_of, answer, reader)
+                    if better is not None:
+                        answer = better
+                except Exception:  # the rules answer stands
+                    traceback.print_exc(file=sys.stderr)
+            self._answers[key] = answer
         return self._answers[key]
 
     def conflicts(self) -> list:
