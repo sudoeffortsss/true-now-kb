@@ -31,7 +31,7 @@ def _states_rate(query, text: str) -> bool:
     asked = set(query.words) & VARIANTS
     return asked <= set(tokens(text))
 _NEWS_TOPICS = re.compile(r"\b(award|awards|recogni\w+|ranked|ranking|named|forbes|honor\w*|anniversary|"
-                          r"how long|latest|recent)\b", re.I)
+                          r"how long|latest|recent|most recent|newest|this year|last year|so far)\b", re.I)
 
 
 def refusal() -> Answer:

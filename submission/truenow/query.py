@@ -16,12 +16,28 @@ _ANY_DATE = re.compile(rf"\b(?:{_MONTHS})\s+(?:\d{{1,2}},?\s+)?\d{{4}}\b|\b20\d{
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*(?:%|percent)", re.I)
 _YEAR = re.compile(r"\b(19[5-9]\d|20[0-4]\d)\b")
 _VEHICLE = re.compile(r"\b(model|vehicle|car|auto|motorcycle|truck|boat|rv|atv|snowmobile|jet ski)\b", re.I)
+# Vehicles named by make or body type ("a 2025 Honda CR-V", "a used SUV").
+_MAKE = re.compile(
+    r"\b(honda|toyota|ford|chevy|chevrolet|nissan|hyundai|kia|subaru|mazda|jeep|dodge|ram|gmc|buick|"
+    r"cadillac|lexus|acura|bmw|mercedes|audi|volkswagen|vw|tesla|volvo|chrysler|lincoln|mitsubishi|"
+    r"infiniti|genesis|porsche|harley|suv|minivan|pickup|sedan)\b", re.I)
+# "financing a 2025 Equinox": a model year right before a name, in a financing question.
+_YEAR_NAME = re.compile(r"\b(20[0-3]\d)\s+(?!Dupaco)[A-Z][A-Za-z0-9-]+")
+_FINANCING = re.compile(r"\b(financ\w*|loan|apr|rate|borrow\w*)\b", re.I)
+# Buying a house is a mortgage; home equity and home improvement loans are not.
+_HOME_BUY = re.compile(r"\b(buy|buying|purchase|purchasing|homebuy\w*|first[- ]time)\b.{0,40}\b(house|home|condo)\b|"
+                       r"\bhouse\b.{0,40}\b(loan|fixed|arm|mortgage)\b", re.I)
+_NOT_MORTGAGE = re.compile(r"\b(equity|heloc|improvement)\b", re.I)
 
-_LINK = re.compile(r"\b(link|links|url|urls|web ?site|web ?page|web address|page)\b", re.I)
+_LINK = re.compile(r"\b(link|links|url|urls|web ?site|web ?page|web address)\b|"
+                   r"\b(which|what)\s+(?:\w+\s+)?page\b|\bpage\s+(?:to|where|for|that|has)\b|"
+                   r"\bwhere\b.*\b(log ?in|login|sign ?in)\b|\bwhere online\b", re.I)
 _ONLINE_ACTION = re.compile(
     r"\b(join|apply|open|enroll|sign up|register|start|become a member)\b.*\bonline\b|"
     r"\bonline\b.*\b(join|apply|open|enroll|sign up|register|application|become a member)\b", re.I)
 _HOURS = re.compile(r"\bhours?\b|\bwhat time\b|\bopen (?:on|until|till|at|late)\b", re.I)
+# "How many volunteer hours" counts hours; it does not ask for a schedule.
+_NOT_SCHEDULE = re.compile(r"\bhow many\b[^?]*\bhours\b|\b(volunteer\w*|service|community|training|credit)\s+hours\b", re.I)
 _COUNTER = re.compile(r"\b(lobby|lobbies|drive[- ]?(?:up|thru|through))\b", re.I)
 _OPEN_CLOSE = re.compile(r"\b(open|opens|close|closes|closing|opening)\b", re.I)
 _PRODUCT = re.compile(r"\b(certificates?|cds?|loans?|mortgages?|accounts?|savings|checking|cards?|visa|ira|iras|"
@@ -87,7 +103,10 @@ def question_day(question: str, as_of: str | None) -> str | None:
 
 def analyze(question: str, as_of: str | None = None) -> Query:
     lower = question.lower()
-    undated = _ANY_DATE.sub(" ", question)
+    # Question side only (page text is indexed as written): "you're" and "I'm" leave no stray
+    # "re" or "m" tokens, and a cashier's check is what the site calls an official check.
+    undated = re.sub(r"['’](?:re|ve|ll|d|m)\b", "", _ANY_DATE.sub(" ", question))
+    undated = re.sub(r"\bcashier['’]?s?\b", "official", undated, flags=re.I)
     if re.search(r"\bapys?\b|annual percentage yield|\byield\b", lower):
         metric = "apy"
     elif re.search(r"\baprs?\b|annual percentage rate", lower):
@@ -100,16 +119,23 @@ def analyze(question: str, as_of: str | None = None) -> Query:
         metric = ""
     percents = [float(p) for p in _PERCENT.findall(question)]
     model_year = None
-    if _VEHICLE.search(undated):
+    vehicle = bool(_VEHICLE.search(undated) or _MAKE.search(undated)
+                   or (_YEAR_NAME.search(undated) and _FINANCING.search(lower)))
+    if vehicle:
         years = _YEAR.findall(undated)
         model_year = int(years[0]) if years else None
     terms = term_months(re.sub(r"\bmodel[\s-]+years?\b", " ", undated, flags=re.I))
     amounts = money_values(undated)
     extreme = "max" if _MAX.search(lower) else ("min" if _MIN.search(lower) else "")
     names_product = bool(_PRODUCT.search(lower))
+    words = tokens(undated)
+    if vehicle and "auto" not in words and (metric or _FINANCING.search(lower)):
+        words.append("auto")
+    if _HOME_BUY.search(lower) and not _NOT_MORTGAGE.search(lower) and "mortgage" not in words:
+        words = [w for w in words if w != "home"] + ["mortgage"]
     return Query(
         text=question,
-        words=tokens(undated),
+        words=words,
         day=question_day(question, as_of),
         metric=metric,
         # "How much does Bright Savings pay?" asks for a rate without saying "rate".
@@ -121,7 +147,8 @@ def analyze(question: str, as_of: str | None = None) -> Query:
         wants_list=bool(_LIST.search(lower) or _PLURAL.search(lower)),
         extreme=extreme,
         wants_link=bool(_LINK.search(lower) or _ONLINE_ACTION.search(lower)),
-        asks_hours=bool(_HOURS.search(lower) or (_COUNTER.search(lower) and _OPEN_CLOSE.search(lower))),
+        asks_hours=bool(_HOURS.search(lower) or (_COUNTER.search(lower) and _OPEN_CLOSE.search(lower)))
+        and not _NOT_SCHEDULE.search(lower),
         asks_address=bool(_ADDRESS.search(lower)),
         asks_count=bool(_COUNT.search(lower)),
         asks_when=bool(_WHEN.search(lower)),

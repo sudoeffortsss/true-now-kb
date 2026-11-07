@@ -371,6 +371,13 @@ def _year_asked(query, today: str):
     return None, False
 
 
+# Only "now" questions: "last year" asks for one year's figure, which the year match below handles.
+# Not counts: money ("a $10,000 Nonprofit Grant") and tax codes ("a 501(c)(3) nonprofit").
+_NOT_A_COUNT = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?(?:\s*(?:k|thousand|million|billion)\b)?|"
+                          r"\b\d{3}\([a-z]\)\(\d+\)", re.I)
+_RECENT = re.compile(r"\bthis year\b|\b(latest|most recent|newest|so far|currently)\b", re.I)
+
+
 def find_count(query, snapshot, today: str = "") -> Found | None:
     """A count stated as "N <noun>", from the most recent page that states it.
 
@@ -391,7 +398,7 @@ def find_count(query, snapshot, today: str = "") -> Found | None:
         passage = snapshot.passages[position]
         page = snapshot.pages[passage.url]
         for sentence in sentences(passage.text):
-            words = tokens(sentence, keep_stopwords=True)
+            words = tokens(_NOT_A_COUNT.sub(" ", sentence), keep_stopwords=True)
             for i, word in enumerate(words):
                 if not word.isdigit():
                     continue
@@ -401,13 +408,15 @@ def find_count(query, snapshot, today: str = "") -> Found | None:
                     j += 1
                 if j < len(gap) and gap[j] in wanted:
                     cover = sum(snapshot.index.idf(w) for w in context & set(words))
-                    year = re.search(r"\b(?:in|during)\s+(20\d{2})\b", sentence)
+                    year = re.search(r"\b(?:in|during)\s+(20\d{2})\b", sentence, re.I)  # "In 2025, ..." too
                     candidates.append((cover, sentence, page, int(year.group(1)) if year else None))
                     break
     if not candidates:
         return None
     top = max(c[0] for c in candidates)
-    close = [c for c in candidates if c[0] >= top * 0.9]
+    # "this year", "latest": the newest dated release wins, so look wider before picking it.
+    share = 0.6 if _RECENT.search(query.text) else 0.9
+    close = [c for c in candidates if c[0] >= top * share]
     newest = sorted(close, key=lambda c: (c[2].published or "0000", c[3] or 0, -c[2].rank), reverse=True)
     target, relative = _year_asked(query, today or snapshot.taken_on)
     picked, earlier = newest[0], None

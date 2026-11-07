@@ -33,7 +33,9 @@ _NOISE = frozenset(tokens(
     "offer offered earn earning pay paying charge much highest lowest best top tier tiers account accounts "
     "month months year years model fixed standard balance between new used option options "
     "type types price cost percent like know tell would link links url website site page see view "
-    "find use check look online show finance financing borrow buy still available", keep_stopwords=True))
+    "find use check look online show finance financing borrow buy still available "
+    "day days these looking planning quoting thinking wondering "
+    "one two three four five six seven eight nine ten twelve fifteen twenty thirty", keep_stopwords=True))
 # Words that mark a heading as being about a product, used to tell product names from other words.
 _PRODUCT_TYPES = frozenset(tokens(
     "loan loans mortgage mortgages certificate certificates account accounts card cards savings checking "
@@ -451,8 +453,15 @@ def _older(chosen: list, lower: list) -> list:
     return out
 
 
+# "What rate and APR...": both were asked, so both are shown.
+_BOTH_KINDS = re.compile(r"\b(rate|dividend)s?\b[^.?]{0,25}\b(and|&|plus)\b[^.?]{0,10}\b(apr|apy)s?\b|"
+                         r"\b(apr|apy)s?\b[^.?]{0,25}\b(and|&|plus)\b[^.?]{0,10}\b(rate|dividend)s?\b", re.I)
+
+
 def shown_kinds(query, fact) -> list:
     have = [k for k, _, _ in fact.values]
+    if _BOTH_KINDS.search(query.text):
+        return [k for k in _SHOW_ORDER if k in have]
     if query.metric == "apy" and "apy" in have:
         return ["apy"]
     if query.metric == "apr" and "apr" in have:
