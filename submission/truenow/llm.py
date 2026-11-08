@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .answer import refusal
+from .answer import NEWS_TOPICS, refusal
 from .contract_types import Answer, Source
 from .extract import ranked_passages
 from .query import analyze
@@ -36,7 +36,8 @@ _RETRY_HTTP = {429, 500, 503}
 
 # Readers the rules answer better than the model (measured on held-apart questions).
 RULES_READERS = frozenset({"address", "count", "event", "hours", "rates_link", "rates_status",
-                           "refusal_rate_not_stated", "refusal_nothing_found", "status_unlisted"})
+                           "refusal_rate_not_stated", "refusal_nothing_found", "status_unlisted",
+                           "refusal_personal"})
 
 KIND_NAMES = {
     "rate_sheet": "official rate sheet", "product": "product page", "document": "document or disclosure",
@@ -53,8 +54,10 @@ Rules:
 4. Answer exactly what was asked in one to three sentences. Give the value for the product, term, tier or amount the question describes. Do not add other tiers, older values, history, or numbers and dates that were not asked for.
 5. Copy numbers, units, times and names exactly as the excerpt writes them (for example "5.39% APR", "8:30 a.m.").
 6. If the question asks for a list, give every item the excerpts list.
-7. Include a URL only when the question asks for a link, website or page.
-8. Never ask the member a question back, never ask for personal details, and never add a phone number unless the question asks for one.
+7. A balance or amount belongs to the tier whose range contains it (for example, $150,000 falls in a "$100,000+" tier). Give that tier only.
+8. Branches appear as address cards: street, city, state, ZIP, status and services. A branch is named by its street or city.
+9. Include a URL only when the question asks for a link, website or page.
+10. Never ask the member a question back, never ask for personal details, and never add a phone number unless the question asks for one.
 
 Return JSON with "evidence" (the ids of the excerpts you used), "answer" and "confident"."""
 
@@ -74,17 +77,22 @@ _NUM = re.compile(r"(\$)?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*(%|percent)?"
 _CANT = re.compile(
     r"\b(can(?:no|')t|cannot|unable to|not able to)\s+(?:confirm|find|determine|say|tell)\b|"
     r"\b(?:is|are)n't (?:listed|stated|mentioned)|\bnot (?:listed|stated|mentioned|specified)\b|"
-    r"\bdoes(?:n't| not) (?:say|state|list|mention|specify)\b|"
+    r"\b(?:do|does)(?:n't| not) (?:say|state|list|mention|specify|include|give)\b|\bno specific\b|"
     r"\b(i (?:do not|don't|can't|cannot) (?:know|find|confirm)|not (?:sure|able to confirm)|"
     r"no (?:longer )?(?:available|offered)|isn't listed|is not listed|please (?:contact|call|visit)|"
     r"no information)\b", re.I)
 _PLACEHOLDER = re.compile(r"<val|\*\*\*|\{[a-z_]+\}", re.I)
+# A question asking for a figure, answered without one (and not "free"), is not answered.
+_ASKS_FIGURE = re.compile(r"\b(what|which)\s+(?:\w+\s+){0,2}(percentage|percent|rate|apr|apy|fee|price|cost|amount)\b|"
+                          r"\bhow much\b", re.I)
+_FREE = re.compile(r"\b(free|no (?:charge|cost|fee)|waived|at no cost|(?:do|does)(?:n't| not) charge)\b", re.I)
+
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]*)[^)]*\)")
 
-MAX_PAGES = 6
-MAX_WINDOWS_PER_PAGE = 3
-MAX_CHARS = 12000
+MAX_PAGES = 10
+MAX_WINDOWS_PER_PAGE = 4
+MAX_CHARS = 20000  # about 4,000 tokens; answers fell outside 12,000 characters 11% of the time
 MAX_WINDOW_CHARS = 2600
 
 
@@ -158,7 +166,15 @@ def _quote_line(page, quote: str) -> int:
 
 
 def build_pack(library, query, rules_sources: list) -> dict:
-    """Excerpts for the model: pages the rules cited first, then rate rows, then ranked passages."""
+    """Excerpts for the model: pages the rules cited first, then rate rows, then ranked passages.
+
+    News-type questions (awards, rankings, "latest") get the smaller pack: more pages there
+    mostly add older releases.
+    """
+    news = bool(NEWS_TOPICS.search(query.text))
+    max_pages = 6 if news else MAX_PAGES
+    max_windows = 3 if news else MAX_WINDOWS_PER_PAGE
+    max_chars = 12000 if news else MAX_CHARS
     snapshot = library.at(query.day)
     today = query.day or library.latest.taken_on
     seeds = []
@@ -178,11 +194,11 @@ def build_pack(library, query, rules_sources: list) -> dict:
         if page is None:
             continue
         if url not in spans:
-            if len(order) >= MAX_PAGES:
+            if len(order) >= max_pages:
                 continue
             order.append(url)
             spans[url] = []
-        if len(spans[url]) < MAX_WINDOWS_PER_PAGE:
+        if len(spans[url]) < max_windows:
             spans[url].append((line, _window(page.text.splitlines(), line)))
 
     excerpts, used = [], 0
@@ -198,7 +214,7 @@ def build_pack(library, query, rules_sources: list) -> dict:
             else:
                 merged.append((start, end, table))
         text = "\n\n[...]\n\n".join(_render(lines, s, e, t, query.wants_link) for s, e, t in merged)
-        room = MAX_CHARS - used
+        room = max_chars - used
         if not text:
             continue
         if room < 400:
@@ -298,6 +314,8 @@ class ModelReader:
             return None  # a figure the evidence does not contain: keep the rules answer
         if _CANT.search(text):
             return refusal()
+        if _ASKS_FIGURE.search(question) and not re.search(r"\d", text) and not _FREE.search(text):
+            return refusal()  # "fees vary in price" does not give the figure asked for
         by_id = {e["id"]: e["url"] for e in pack["excerpts"]}
         urls = [by_id[i] for i in data.get("evidence", []) if isinstance(i, str) and i in by_id]
         urls += [s.url for s in rules.sources or []]

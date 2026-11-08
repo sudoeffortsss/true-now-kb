@@ -34,6 +34,13 @@ _NEWS_TOPICS = re.compile(r"\b(award|awards|recogni\w+|ranked|ranking|named|forb
                           r"how long|latest|recent|most recent|newest|this year|last year|so far)\b", re.I)
 
 
+# Public name for the model layer.
+NEWS_TOPICS = _NEWS_TOPICS
+# The member's own account data is never on the website.
+_PERSONAL = re.compile(r"\b(what(?:'s| is| are)|tell me)\s+my\s+(?:\w+\s+){0,3}(balance|balances|transactions|statement|credit score)\b|"
+                       r"\bhow much (?:money )?(?:is|do i have) in my\b", re.I)
+
+
 def refusal() -> Answer:
     return Answer(text=REFUSAL, sources=[], confident=False)
 
@@ -54,6 +61,8 @@ def respond(library, question: str, as_of: str | None = None) -> Answer:
 
 def respond_traced(library, question: str, as_of: str | None = None) -> tuple:
     """(Answer, name of the reader that produced it). The model layer routes on the name."""
+    if _PERSONAL.search(question):
+        return refusal(), "refusal_personal"
     query = analyze(question, as_of)
     snapshot = library.at(query.day)
     today = query.day or library.latest.taken_on

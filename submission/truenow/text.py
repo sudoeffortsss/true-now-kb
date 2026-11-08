@@ -26,6 +26,7 @@ _CANON = {
     "drive": "driveup", "driveup": "driveup", "drivethru": "driveup", "thru": "driveup",
     "phone": "call", "telephone": "call", "number": "number",
     "located": "location", "locations": "location", "address": "location",
+    "ave": "avenue", "rd": "road", "ln": "lane", "hwy": "highway", "blvd": "boulevard", "pkwy": "parkway",
     "open": "open", "opening": "open", "opened": "open",
     "close": "close", "closed": "close", "closing": "close", "closure": "close",
     "join": "join", "joining": "join", "membership": "member", "members": "member",

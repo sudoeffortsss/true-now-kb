@@ -54,8 +54,15 @@ class Found:
 _LINK_ONLY = re.compile(r"^(?:[-*]\s+)?(?:\[[^\]]*\]\([^)]*\)\s*)+[>›]?$")
 
 
+# Branch cards are short lines too, but an address or a phone number is an answer, not a menu.
+_ADDRESS_LINE = re.compile(r"\b\d{1,6}\s+[A-Za-z0-9.' -]{2,40},\s*[A-Za-z .'-]{2,30},\s*[A-Z]{2}\b")
+_PHONE_LINE = re.compile(r"\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b")
+
+
 def _navigation(text: str) -> bool:
     """Menu crumbs ("Login help Join Dupaco Dupaco.com") and bare link buttons carry no answer."""
+    if _ADDRESS_LINE.search(text) or _PHONE_LINE.search(text):
+        return False
     if " | " in text or re.search(r"\d+(?:\.\d+)?\s*%|\$\s?\d|\d{1,2}:\d{2}", text):
         return False  # table rows and short factual lines ("Lost debit card fee: $2.50")
     if _LINK_ONLY.match(text.strip()):

@@ -139,6 +139,12 @@ class ModelGuards(unittest.TestCase):
                 self.assertFalse(answer.confident)
                 self.assertEqual(answer.text, REFUSAL)
 
+    def test_figure_question_needs_a_figure(self):
+        vague = self.reply({"evidence": ["E1"], "answer": "It depends on the card.", "confident": True})
+        self.assertEqual(vague.text, REFUSAL)
+        free = self.reply({"evidence": ["E1"], "answer": "Replacing a lost debit card is free.", "confident": True})
+        self.assertTrue(free.confident)
+
     def test_unusable_reply_keeps_the_rules_answer(self):
         self.assertIsNone(self.reply(None))
         self.assertIsNone(self.reply({"evidence": ["E1"], "answer": "It is <value>***", "confident": True}))
@@ -173,6 +179,11 @@ class ToySite(unittest.TestCase):
         answer = self.system.answer("What is the 60-month jumbo certificate rate?")
         self.assertFalse(answer.confident)
         self.assertEqual(_numbers(answer.text), set())
+
+    def test_own_account_data_is_refused(self):
+        answer, reader = respond_traced(self.system.library, "What's my current account balance?")
+        self.assertEqual(reader, "refusal_personal")
+        self.assertFalse(answer.confident)
 
     def test_repeated_question_gives_the_same_answer(self):
         first = self.system.answer("What is the 6-month certificate APY?")
