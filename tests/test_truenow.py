@@ -163,6 +163,149 @@ class ModelGuards(unittest.TestCase):
         self.assertIsNone(llm.ModelReader.from_env())  # TRUENOW_LLM=off in this test run
 
 
+class _Obj:
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
+
+
+class _FakeAnthropic:
+    """Stands in for anthropic.Anthropic(): records the request, returns a canned reply."""
+
+    def __init__(self, stop_reason="end_turn", text='{"evidence": ["E1"], "answer": "It is $2.50.", "confident": true}',
+                 beta_error=None):
+        self.requests, self.beta_requests, self.beta_error = [], [], beta_error
+        self.messages = self
+        self.beta = _Obj(messages=_Obj(create=self._beta_create))
+        self._reply = _Obj(stop_reason=stop_reason, content=[_Obj(type="text", text=text)],
+                           usage=_Obj(input_tokens=1000, output_tokens=20))
+
+    def create(self, **request):
+        self.requests.append(request)
+        return self._reply
+
+    def _beta_create(self, **request):
+        self.beta_requests.append(request)
+        if self.beta_error:
+            raise self.beta_error
+        return self._reply
+
+
+class _ParameterRejected(Exception):
+    status_code = 400
+
+
+class _FakeOpenAI:
+    """Stands in for openai.OpenAI(): rejects the parameters named in `refuse`."""
+
+    def __init__(self, refuse=()):
+        self.requests, self.refuse = [], set(refuse)
+        self.chat = _Obj(completions=self)
+
+    def create(self, **request):
+        self.requests.append(request)
+        for name in self.refuse:
+            if name in request:
+                raise _ParameterRejected(f"Unsupported parameter: '{name}'")
+        message = _Obj(content='{"evidence": ["E2"], "answer": "It is $2.50.", "confident": true}')
+        return _Obj(choices=[_Obj(finish_reason="stop", message=message)],
+                    usage=_Obj(prompt_tokens=1000, completion_tokens=20))
+
+
+class Providers(unittest.TestCase):
+    """Choosing a provider and calling it, with fake SDK clients (no network, no SDK installed)."""
+
+    NAMES = ("TRUENOW_LLM", "TRUENOW_LLM_PROVIDER", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+             "GEMINI_MODEL", "ANTHROPIC_MODEL", "OPENAI_MODEL")
+
+    def setUp(self):
+        self.saved = {n: os.environ.pop(n, None) for n in self.NAMES}
+        self.saved_env_file = llm.ENV_FILE
+        llm.ENV_FILE = Path(os.devnull)  # ignore a developer's local .env
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
+        llm.ENV_FILE = self.saved_env_file
+
+    def test_no_key_means_rules_only(self):
+        self.assertIsNone(llm.ModelReader.from_env())
+
+    def test_the_key_present_picks_the_provider(self):
+        os.environ["ANTHROPIC_API_KEY"] = "a"
+        reader = llm.ModelReader.from_env()
+        self.assertEqual((reader.provider, reader.model), ("anthropic", llm.PROVIDERS["anthropic"][2]))
+        os.environ["OPENAI_API_KEY"] = "o"  # several keys: the first provider in PROVIDERS wins
+        self.assertEqual(llm.ModelReader.from_env().provider, "openai")
+        os.environ["GEMINI_API_KEY"] = "g"
+        self.assertEqual(llm.ModelReader.from_env().provider, "gemini")
+
+    def test_provider_and_model_can_be_chosen(self):
+        os.environ.update(GEMINI_API_KEY="g", OPENAI_API_KEY="o", TRUENOW_LLM_PROVIDER="openai",
+                          OPENAI_MODEL="some-model")
+        reader = llm.ModelReader.from_env()
+        self.assertEqual((reader.provider, reader.model), ("openai", "some-model"))
+
+    def test_claude_request_turns_thinking_off_and_asks_for_json(self):
+        reader = llm.ModelReader("k", "claude-haiku-5-5", provider="anthropic")
+        reader._client = fake = _FakeAnthropic()
+        self.assertEqual(reader._ask("prompt")["answer"], "It is $2.50.")
+        request = fake.requests[0]
+        self.assertEqual(request["thinking"], {"type": "disabled"})
+        self.assertEqual(request["output_config"]["format"]["type"], "json_schema")
+        self.assertEqual(request["system"], llm.SYSTEM)
+        self.assertNotIn("temperature", request)
+
+    def test_claude_refusal_or_cut_off_keeps_the_rules_answer(self):
+        for stop in ("refusal", "max_tokens"):
+            reader = llm.ModelReader("k", "claude-haiku-5-5", provider="anthropic")
+            reader._client = _FakeAnthropic(stop_reason=stop)
+            self.assertIsNone(reader._ask("prompt"))
+
+    def test_opus_asks_for_the_server_side_refusal_fallback(self):
+        reader = llm.ModelReader("k", "claude-opus-5-5", provider="anthropic")
+        reader._client = fake = _FakeAnthropic()
+        self.assertIsNotNone(reader._ask("prompt"))
+        self.assertEqual(fake.beta_requests[0]["fallbacks"], "default")
+        self.assertEqual(fake.beta_requests[0]["betas"], [llm._FALLBACK_BETA])
+        self.assertEqual(fake.requests, [])
+
+    def test_a_rejected_fallback_is_dropped_for_the_rest_of_the_run(self):
+        reader = llm.ModelReader("k", "claude-opus-5-5", provider="anthropic")
+        reader._client = fake = _FakeAnthropic(beta_error=_ParameterRejected("fallbacks is not available"))
+        self.assertIsNotNone(reader._ask("prompt"))
+        self.assertFalse(reader._claude_fallbacks)
+        reader._ask("again")
+        self.assertEqual((len(fake.beta_requests), len(fake.requests)), (1, 2))
+
+    def test_claude_models_without_an_off_switch_get_low_effort(self):
+        self.assertEqual(llm._claude_settings("claude-opus-5-5"), (None, "low"))
+        self.assertEqual(llm._claude_settings("claude-sonnet-5-5"), ({"type": "between_tools"}, None))
+
+    def test_openai_request_uses_strict_json(self):
+        reader = llm.ModelReader("k", "m", provider="openai")
+        reader._client = fake = _FakeOpenAI()
+        self.assertEqual(reader._ask("prompt")["evidence"], ["E2"])
+        self.assertTrue(fake.requests[0]["response_format"]["json_schema"]["strict"])
+
+    def test_openai_finds_the_parameters_a_model_accepts(self):
+        reader = llm.ModelReader("k", "m", provider="openai")
+        reader._client = fake = _FakeOpenAI(refuse=("reasoning_effort",))
+        self.assertIsNotNone(reader._ask("prompt"))
+        self.assertEqual(reader._openai_shape, {"temperature": 0, "seed": 7})
+        reader._ask("prompt again")  # the shape that worked is reused, no more probing
+        self.assertEqual(len(fake.requests), 4)
+
+    def test_sdk_errors_keep_the_rules_answer(self):
+        reader = llm.ModelReader("k", "claude-haiku-5-5", provider="anthropic")
+
+        class Broken:
+            messages = None
+        reader._client = Broken()
+        self.assertIsNone(reader._ask("prompt"))
+
+
 class ToySite(unittest.TestCase):
     """End to end on the kit's toy site, rules only."""
 

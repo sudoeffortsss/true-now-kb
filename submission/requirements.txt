@@ -1,1 +1,4 @@
-# No third-party packages: the system uses the Python standard library only.
+# The rules, and the optional Gemini reader, use the Python standard library only.
+# These two SDKs are imported only when their key is set (ANTHROPIC_API_KEY, OPENAI_API_KEY).
+anthropic==2.6.0
+openai==3.46.0

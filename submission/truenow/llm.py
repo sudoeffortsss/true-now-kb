@@ -1,7 +1,10 @@
-"""Optional model reader on top of the rules, using the Gemini API (standard library only).
+"""Optional model reader on top of the rules: Gemini, Claude or OpenAI.
 
-Switched on when GEMINI_API_KEY is set, in the environment or in a git-ignored .env file
-at the repository root, unless TRUENOW_LLM=off. Without a key the system is the rules alone.
+Switched on when a provider key is set (GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY),
+in the environment or in a git-ignored .env file at the repository root, unless TRUENOW_LLM=off.
+With several keys the first in PROVIDERS is used; TRUENOW_LLM_PROVIDER picks one explicitly.
+Gemini is called through the standard library; Claude and OpenAI through their official SDKs,
+imported only when used. Without a key the system is the rules alone.
 
 The rules still decide what counts as current: they pick the snapshot for the date, rank
 pages by authority and gather the evidence. The model only reads that evidence and writes
@@ -17,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -28,8 +32,19 @@ from .extract import ranked_passages
 from .query import analyze
 from .rates import find_rates
 
-DEFAULT_MODEL = "gemini-3.5-flash-lite"
+# provider -> (key variable, model variable, default model), in the order tried when several keys
+# are set: best measured accuracy and speed first (see NOTES).
+PROVIDERS = {
+    "gemini": ("GEMINI_API_KEY", "GEMINI_MODEL", "gemini-3.5-flash-lite"),
+    "openai": ("OPENAI_API_KEY", "OPENAI_MODEL", "gpt-6-luna"),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "claude-opus-5-5"),
+}
+# Claude models that take the server-side refusal fallback ("default" picks the fallback model).
+_FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5")
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+DEFAULT_MODEL = PROVIDERS["gemini"][2]
 API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 ATTEMPT_TIMEOUT_S = 4.0
 TOTAL_BUDGET_S = 6.0
 _RETRY_HTTP = {429, 500, 503}
@@ -72,6 +87,21 @@ SCHEMA = {
     "required": ["evidence", "answer", "confident"],
     "propertyOrdering": ["evidence", "answer", "confident"],
 }
+# The same reply shape as standard JSON Schema, for Claude and OpenAI structured outputs.
+JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "answer": {"type": "string"},
+        "confident": {"type": "boolean"},
+    },
+    "required": ["evidence", "answer", "confident"],
+    "additionalProperties": False,
+}
+# OpenAI models differ in the sampling and reasoning parameters they accept; the first shape
+# that is not rejected is kept for the rest of the run.
+_OPENAI_SHAPES = ({"reasoning_effort": "none"}, {"reasoning_effort": "minimal"},
+                  {"temperature": 0, "seed": 7}, {})
 
 # Same number reading as the kit's scorer: value plus "$" / "%" / no unit.
 _NUM = re.compile(r"(\$)?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*(%|percent)?", re.I)
@@ -105,19 +135,38 @@ def numbers(text: str) -> set:
     return out
 
 
-def _key() -> str:
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if key:
-        return key
-    env = Path(__file__).resolve().parents[2] / ".env"
+def _env_value(name: str) -> str:
+    """A setting from the environment, else from the git-ignored .env file, else ""."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
     try:
-        for line in env.read_text(encoding="utf-8").splitlines():
-            name, _, value = line.partition("=")
-            if name.strip() == "GEMINI_API_KEY":
-                return value.strip().strip('"').strip("'")
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            key, _, found = line.partition("=")
+            if key.strip() == name:
+                return found.strip().strip('"').strip("'")
     except OSError:
         pass
     return ""
+
+
+def _claude_settings(model: str) -> tuple:
+    """(thinking, effort) for speed: thinking off where the model allows it, else the lowest effort."""
+    if model.startswith("claude-sonnet-5-5"):
+        return {"type": "between_tools"}, None  # this model turns thinking off this way
+    if "haiku" in model or "sonnet" in model:
+        return {"type": "disabled"}, None
+    if "opus" in model or "fable" in model or "mythos" in model:
+        return None, "low"  # thinking cannot be switched off on these
+    return None, None
+
+
+def _rejected_parameter(error: Exception) -> bool:
+    """True for a 400 that complains about a sampling or reasoning parameter."""
+    if getattr(error, "status_code", None) != 400:
+        return False
+    text = str(error).lower()
+    return any(word in text for word in ("reasoning_effort", "temperature", "seed", "unsupported", "not supported"))
 
 
 # ---- evidence ---------------------------------------------------------------------------
@@ -247,21 +296,107 @@ def user_prompt(question: str, pack: dict, draft: str = "") -> str:
 # ---- model call ---------------------------------------------------------------------------
 
 class ModelReader:
-    def __init__(self, key: str, model: str = DEFAULT_MODEL):
+    def __init__(self, key: str, model: str = DEFAULT_MODEL, provider: str = "gemini"):
         self.key = key
         self.model = model
+        self.provider = provider
+        self._local = threading.local()  # per-thread token counts of the last call
+        self._client = None   # SDK client, built on first use (Claude, OpenAI)
+        self._openai_shape = None
+        self._claude_fallbacks = model.startswith(_FALLBACK_MODELS)  # dropped if the API rejects it
 
     @classmethod
     def from_env(cls):
         """A reader when a key is available and the layer is not switched off, else None."""
         if os.environ.get("TRUENOW_LLM", "").strip().lower() in ("off", "0", "false", "no"):
             return None
-        key = _key()
-        if not key:
-            return None
-        return cls(key, os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_MODEL)
+        wanted = os.environ.get("TRUENOW_LLM_PROVIDER", "").strip().lower()
+        for name in ([wanted] if wanted in PROVIDERS else list(PROVIDERS)):
+            key_name, model_name, default = PROVIDERS[name]
+            key = _env_value(key_name)
+            if key:
+                return cls(key, _env_value(model_name) or default, provider=name)
+        return None
 
     def _ask(self, prompt: str):
+        """The model's reply as a dict, or None on any failure (the rules answer then stands)."""
+        try:
+            if self.provider == "anthropic":
+                return self._ask_anthropic(prompt)
+            if self.provider == "openai":
+                return self._ask_openai(prompt)
+            return self._ask_gemini(prompt)
+        except Exception:  # timeout, network, missing SDK, malformed reply
+            return None
+
+    @property
+    def last_usage(self) -> dict:
+        """Input and output tokens of this thread's last call (for cost tracking)."""
+        return getattr(self._local, "usage", {})
+
+    def _sdk_client(self):
+        if self._client is None:
+            if self.provider == "anthropic":
+                import anthropic
+                self._client = anthropic.Anthropic(api_key=self.key, timeout=ATTEMPT_TIMEOUT_S, max_retries=1)
+            else:
+                import openai
+                self._client = openai.OpenAI(api_key=self.key, timeout=ATTEMPT_TIMEOUT_S, max_retries=1)
+        return self._client
+
+    def _ask_anthropic(self, prompt: str):
+        thinking, effort = _claude_settings(self.model)
+        output_config = {"format": {"type": "json_schema", "schema": JSON_SCHEMA}}
+        if effort:
+            output_config["effort"] = effort
+        request = {"model": self.model, "max_tokens": 1024 if thinking else 4096, "system": SYSTEM,
+                   "messages": [{"role": "user", "content": prompt}], "output_config": output_config}
+        if thinking:
+            request["thinking"] = thinking
+        client = self._sdk_client()
+        response = None
+        if self._claude_fallbacks:
+            try:  # on a safety decline the API re-runs the request on a fallback model
+                response = client.beta.messages.create(**request, betas=[_FALLBACK_BETA], fallbacks="default")
+            except Exception as error:
+                if getattr(error, "status_code", None) != 400 or "fallback" not in str(error).lower():
+                    raise
+                self._claude_fallbacks = False  # not offered for this key or model: plain requests from now on
+        if response is None:
+            response = client.messages.create(**request)
+        usage = getattr(response, "usage", None)
+        self._local.usage = {"input": getattr(usage, "input_tokens", 0), "output": getattr(usage, "output_tokens", 0)}
+        if response.stop_reason != "end_turn":
+            return None  # a refusal or a cut-off reply: the rules answer stands
+        text = next((block.text for block in response.content if block.type == "text"), "")
+        return json.loads(text)
+
+    def _ask_openai(self, prompt: str):
+        request = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": "answer", "strict": True, "schema": JSON_SCHEMA}},
+        }
+        client = self._sdk_client()
+        for shape in ([self._openai_shape] if self._openai_shape is not None else _OPENAI_SHAPES):
+            try:
+                response = client.chat.completions.create(**request, **shape)
+            except Exception as error:
+                if self._openai_shape is None and _rejected_parameter(error):
+                    continue  # this model does not take that parameter: try the next shape
+                return None
+            self._openai_shape = shape
+            usage = getattr(response, "usage", None)
+            self._local.usage = {"input": getattr(usage, "prompt_tokens", 0),
+                               "output": getattr(usage, "completion_tokens", 0)}
+            choice = response.choices[0]
+            if choice.finish_reason != "stop" or not choice.message.content:
+                return None
+            return json.loads(choice.message.content)
+        return None
+
+    def _ask_gemini(self, prompt: str):
         body = json.dumps({
             "systemInstruction": {"parts": [{"text": SYSTEM}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -278,6 +413,9 @@ class ModelReader:
             try:
                 with urllib.request.urlopen(request, timeout=min(ATTEMPT_TIMEOUT_S, remaining)) as response:
                     data = json.load(response)
+                usage = data.get("usageMetadata", {})
+                self._local.usage = {"input": usage.get("promptTokenCount", 0),
+                                   "output": (usage.get("candidatesTokenCount", 0) or 0) + (usage.get("thoughtsTokenCount", 0) or 0)}
                 parts = data["candidates"][0]["content"]["parts"]
                 return json.loads("".join(p.get("text", "") for p in parts if not p.get("thought")))
             except urllib.error.HTTPError as error:
