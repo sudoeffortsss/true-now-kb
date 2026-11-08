@@ -35,7 +35,8 @@ _LINK = re.compile(r"\b(link|links|url|urls|web ?site|web ?page|web address)\b|"
 _ONLINE_ACTION = re.compile(
     r"\b(join|apply|open|enroll|sign up|register|start|become a member)\b.*\bonline\b|"
     r"\bonline\b.*\b(join|apply|open|enroll|sign up|register|application|become a member)\b", re.I)
-_HOURS = re.compile(r"\bhours?\b|\bwhat time\b|\bopen (?:on|until|till|at|late)\b", re.I)
+# "open at 9" is about hours; "which IRAs can I open at Dupaco" is about opening an account.
+_HOURS = re.compile(r"\bhours?\b|\bwhat time\b|\bopen (?:on|until|till|late)\b|\bopen at \d", re.I)
 # "How many volunteer hours" counts hours; it does not ask for a schedule.
 _NOT_SCHEDULE = re.compile(r"\bhow many\b[^?]*\bhours\b|\b(volunteer\w*|service|community|training|credit)\s+hours\b", re.I)
 _COUNTER = re.compile(r"\b(lobby|lobbies|drive[- ]?(?:up|thru|through))\b", re.I)

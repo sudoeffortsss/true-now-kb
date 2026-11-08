@@ -151,8 +151,10 @@ class ModelGuards(unittest.TestCase):
 
     def test_routing(self):
         reader = llm.ModelReader("test-key")
-        for name in ("hours", "count", "address", "event", "rates_link"):
+        for name in ("hours", "count", "rates_link", "refusal_personal"):
             self.assertFalse(reader.wanted(name, analyze("What are the lobby hours?")))
+        for name in ("address", "event"):
+            self.assertTrue(reader.wanted(name, analyze("Where is the Peosta branch?")))
         self.assertTrue(reader.wanted("passage", analyze("Can I open an account online?")))
         self.assertTrue(reader.wanted("rates", analyze("What is the 12-month certificate APY?")))
         self.assertFalse(reader.wanted("rates", analyze("Does any savings tier pay 0.35% APY?")))

@@ -35,7 +35,8 @@ TOTAL_BUDGET_S = 6.0
 _RETRY_HTTP = {429, 500, 503}
 
 # Readers the rules answer better than the model (measured on held-apart questions).
-RULES_READERS = frozenset({"address", "count", "event", "hours", "rates_link", "rates_status",
+# Addresses and events moved to the model once branch cards reached the evidence (no losses, two gains).
+RULES_READERS = frozenset({"count", "hours", "rates_link", "rates_status",
                            "refusal_rate_not_stated", "refusal_nothing_found", "status_unlisted",
                            "refusal_personal"})
 
