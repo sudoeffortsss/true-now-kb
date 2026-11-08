@@ -2,7 +2,7 @@
 
 ## Approach
 
-The system answers from the five snapshots only. A rules core decides what is current and gathers the evidence. An optional model reader (Gemini, used only when a key is set) then writes the answer from that evidence, for the question types where it measured better than the rules. Everything is in `submission/truenow/` and uses the Python standard library only.
+The system answers from the five snapshots only. A rules core decides what is current and gathers the evidence. An optional model reader (Gemini, OpenAI or Claude, used only when a key is set) then writes the answer from that evidence, for the question types where it measured better than the rules. Everything is in `submission/truenow/`. The rules and the Gemini call use the Python standard library only; OpenAI and Claude are called through their official SDKs.
 
 **Rules core.**
 
@@ -21,7 +21,7 @@ The system answers from the five snapshots only. A rules core decides what is cu
 
   Each entry is one fact. It lists the competing values, gives the current value as `resolution`, and says why. Different tiers, or a rate next to its own APY, are not conflicts.
 
-**Optional model reader** (`llm.py`). With `GEMINI_API_KEY` set, the rules answer first, and their choices still decide the snapshot, the page authority and the evidence. A question then goes to `gemini-3.5-flash-lite` or stays with the rules, depending on the reader that answered:
+**Optional model reader** (`llm.py`). With a provider key set (see API keys below), the rules answer first, and their choices still decide the snapshot, the page authority and the evidence. A question then goes to the model or stays with the rules, depending on the reader that answered:
 
 - The model reads questions answered by passage search, rate tables, links, phone lookup, addresses and events, and rate questions the rules declined: about 90% of questions.
 - The rules keep hours, counts, rate links, and rate checks such as "does any tier pay 0.35%?". For these the rules measured better, or the rate sheet should decide by design.
@@ -41,11 +41,17 @@ A reply is kept only if every number in it appears in that evidence, the rules' 
 
 ## API keys and cost
 
-- **None required.** Without a key the system is the rules alone, and `requirements.txt` installs nothing.
-- **Optional: `GEMINI_API_KEY`** (paid Google Gemini API). It can be set in the environment, or in a `.env` file at the repository root, which git ignores.
-  - It enables the model reader with `gemini-3.5-flash-lite`. `GEMINI_MODEL` overrides the model, and `TRUENOW_LLM=off` switches the reader off.
-  - A model call sends about 4,200 tokens of evidence and costs about $0.002. That was measured as $2.82 for 1,457 calls, at $0.30 / $2.50 per million input / output tokens.
-  - The model adds about one second per question. The p95 answer time was 1.36 s on the practice set and 1.07 s on the holdout.
+- **None required.** Without a key the system is the rules alone. `requirements.txt` installs the official Anthropic and OpenAI SDKs (pinned versions), which are imported only when their key is set.
+- **Optional: any one of three paid APIs.** The key can be set in the environment, or in a `.env` file at the repository root, which git ignores.
+
+  | Key | Model | Cost per model call (measured) | p95 answer time: practice, holdout |
+  | --- | --- | --- | --- |
+  | `GEMINI_API_KEY` | `gemini-3.5-flash-lite` | about $0.002 | 1.36 s, 1.07 s |
+  | `OPENAI_API_KEY` | `gpt-6-luna` | about $0.0005 | 2.16 s, 1.93 s |
+  | `ANTHROPIC_API_KEY` | `claude-opus-5-5` | about $0.034 | 3.82 s, 6.63 s |
+
+  With several keys, the first in this order is used: best measured accuracy and speed first. `TRUENOW_LLM_PROVIDER` (`gemini`, `openai` or `anthropic`) picks one; `GEMINI_MODEL`, `OPENAI_MODEL` and `ANTHROPIC_MODEL` override the model; `TRUENOW_LLM=off` switches the reader off.
+- **How each is called.** A call sends a prompt of about 4,000 to 8,600 tokens, depending on the provider's tokenizer, and asks for the same JSON reply. Gemini runs at temperature 0 with a fixed seed. GPT-6 Luna runs with reasoning off. Claude Opus 5.5 runs with the lowest thinking effort, and with the server-side refusal fallback, which re-runs a declined request on another Claude model.
 
 ## How it was measured
 
@@ -53,9 +59,9 @@ Every change was checked with the kit's scorer. Besides the practice set, the sy
 
 The model, the routing and every later change were chosen on these questions. At first only a stratified sample of 447 was used. After one untouched measurement on 7 November, the remaining 1,239 were used too.
 
-A frozen holdout of 394 questions, set aside at the start, was never used to make a decision. It was measured twice: on the first version with the model, and on this final version.
+A frozen holdout of 394 questions, set aside at the start, was never used to make a decision. It was measured on the first version with the model, and on this final version with each provider.
 
-| Question set | Rules only | Rules + model | p95 with model |
+| Question set | Rules only | Rules + Gemini | p95 with Gemini |
 | --- | --- | --- | --- |
 | Kit practice set (40; the rules were tuned on it) | 0.907 | 0.922 | 1.36 s |
 | `bench/dev.jsonl` (57; written with the code) | 0.989 | 1.000 | 1.09 s |
@@ -110,6 +116,32 @@ Once branch cards reached the evidence, the routing was measured again on all 1,
 - Counts stayed with the rules: the practice set lost a question when the model answered them.
 - Hours stayed with the rules too: 8 gained, 7 lost.
 
+**Adding OpenAI and Claude.** The evidence, the prompt, the reply checks and the routing are shared; only the call differs. Seven candidates were screened on the same 340 questions: the practice set and 300 independent ones.
+
+| Model | Practice | Independent | p95 of a model call | Cost of 300 calls |
+| --- | --- | --- | --- | --- |
+| `gemini-3.5-flash-lite` (the pipeline was tuned with it) | 0.922 | 0.870 | about 1.0 s | about $0.57 |
+| `gpt-6-luna` | 0.891 | 0.865 | 1.80 s | $0.16 |
+| `gpt-5.6-luna` | 0.891 | 0.862 | 1.57 s | $0.32 |
+| `gpt-5.4-mini` | 0.876 | 0.856 | 0.92 s | $1.21 |
+| `gpt-5.4-nano` | 0.896 | 0.823 | 1.28 s | $0.33 |
+| `claude-opus-5-5` | 0.922 | 0.857 | 6.13 s | $10.11 |
+| `claude-sonnet-5-5` | 0.891 | 0.859 | 5.63 s | $5.05 |
+| `claude-haiku-5-5` | 0.899 | 0.792 | 2.13 s | $0.25 |
+
+The screen ran four calls at a time, so its call times run higher than one question at a time. `gpt-6-luna` and `claude-opus-5-5` were the most accurate of their providers and became the defaults.
+
+After that choice, each provider was measured with the harness on the practice set and the holdout:
+
+| Provider | Practice | Holdout | Holdout p95 | Holdout final score (without the conflicts pillar) |
+| --- | --- | --- | --- | --- |
+| Gemini `gemini-3.5-flash-lite` | 0.922 | 0.810 | 1.07 s | 0.803 |
+| OpenAI `gpt-6-luna` | 0.930 | 0.809 | 1.93 s | 0.798 |
+| Claude `claude-opus-5-5` | 0.922 | 0.806 | 6.63 s | 0.762 |
+| No key (rules only) | 0.907 | 0.643 | 0.02 s | 0.632 |
+
+Sixty questions were asked twice, with fresh calls each time. The numbers in the two answers matched 60 times for Gemini, 54 for GPT-6 Luna and 50 for Claude Opus 5.5. The last two take no temperature setting. Within a run, the answer cache returns the first answer, so the harness's repeat check is not affected.
+
 ## Changes tried and dropped
 
 A change was kept only if it raised the score without losing questions elsewhere. These were measured on the 1,239 and dropped:
@@ -129,5 +161,6 @@ A change was kept only if it raised the score without losing questions elsewhere
 - **Extra values.** With ten pages of evidence, the model sometimes adds a second product's value, for example a refinance rate next to the purchase rate. The scorer counts that as a stale value. Of the 3 stale-value hits the final version added on the holdout, 2 come from this and 1 from a relative date.
 - **Weakest categories with the model**, on the holdout: conflict resolution 0.58, stale-value traps 0.77, "as of" questions 0.79, and questions that should be refused 0.79. The last one was 0.88 in the earlier version. On the tuning sets, the drop came with the larger evidence pack: more evidence tempts the model to answer. Without a key, the weakest are lists 0.29, conflict resolution 0.47 and current values 0.49.
 - **Found on the holdout, not tuned.** The "what changed", relative-date and extra-value gaps were found on the holdout, so they were not tuned there.
+- **OpenAI and Claude were not tuned.** The prompt, the evidence size and the routing were tuned with Gemini, and the other two run the same pipeline. Claude Opus 5.5 is also slow: p95 6.6 s on the holdout, which costs about 0.04 of the harness's final score through the speed pillar.
 - **Conflicts.** Against eight independently labelled conflict lists, the mean F1 is 0.55 and the resolution accuracy 0.56. The 0.96 on our own list (`bench/conflicts_gold.json`) is circular.
-- **Determinism.** Calls use temperature 0 and a fixed seed, and answers are cached per question within a run. Repeated questions gave the same answer 60 times out of 60. The provider can still change the model behind a name.
+- **Determinism.** Gemini calls use temperature 0 and a fixed seed; OpenAI and Claude take no temperature setting, so their wording can change between runs (see the repeat test above). Answers are cached per question within a run. A provider can also change the model behind a name.

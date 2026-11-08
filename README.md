@@ -11,7 +11,7 @@ The task is described in [ASSIGNMENT.md](ASSIGNMENT.md), the participant kit's R
 
 ## Run it
 
-Python 3.11. The system uses the standard library only, so the install step installs nothing.
+Python 3.11. The rules use the standard library only; the install step adds the official Anthropic and OpenAI SDKs, which are imported only when their key is set.
 
 ```bash
 pip install -r requirements.txt
@@ -22,7 +22,7 @@ Unit tests need no snapshots, network or key: `python -m unittest discover -s te
 
 The website snapshots are not in this repository. Put the kit's five snapshot zips in `snapshots_zip/`; the first run unpacks them into `snapshots/`.
 
-Without an API key the system is rules only. With `GEMINI_API_KEY` set (a paid Gemini API key, in the environment or in a `.env` file at the repository root), a model reader writes the answers for the question types where it measured better. `TRUENOW_LLM=off` switches it off again. See NOTES.md for what it costs and when it is used.
+Without an API key the system is rules only. With a paid key for Gemini, OpenAI or Claude (`GEMINI_API_KEY`, `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, in the environment or in a `.env` file at the repository root), a model reader writes the answers for the question types where it measured better. With several keys it uses Gemini first, then OpenAI, then Claude; `TRUENOW_LLM_PROVIDER` picks one, and `TRUENOW_LLM=off` switches the reader off. See NOTES.md for the models, what they cost and when they are used.
 
 ## Layout
 
